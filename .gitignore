@@ -28,3 +28,5 @@ go.work.sum
 .idea/
 .vscode/
 Bitground-go.iml
+
+.Ds_Store
