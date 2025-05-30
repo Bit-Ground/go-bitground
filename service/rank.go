@@ -1,17 +1,5 @@
 package service
 
-import (
-	"database/sql"
-)
-
-type RankUpdateService struct {
-	db *sql.DB
-}
-
-func NewRankUpdateService(db *sql.DB) *RankUpdateService {
-	return &RankUpdateService{db: db}
-}
-
 //// 시즌 참여중 userId 목록 가져오기
 //func getParticipatingUserIDs(db *sql.DB) ([]int, error) {
 //	query := `

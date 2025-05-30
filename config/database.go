@@ -1,9 +1,11 @@
 package config
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	_ "github.com/go-sql-driver/mysql"
+	"time"
 )
 
 // DBConfig db 구성 구조체
@@ -28,7 +30,7 @@ func NewDBConfig(obj map[string]interface{}) DBConfig {
 }
 
 // ConnectDB 데이터베이스 연결
-func ConnectDB(cfg DBConfig) (*sql.DB, error) {
+func ConnectDB(ctx context.Context, cfg DBConfig) (*sql.DB, error) {
 
 	// MySQL DSN 구성
 	dsn := fmt.Sprintf("%s:%s@tcp(%s)/%s?charset=%s&parseTime=true",
@@ -39,11 +41,20 @@ func ConnectDB(cfg DBConfig) (*sql.DB, error) {
 		return nil, fmt.Errorf("데이터베이스 연결 실패: %v", err)
 	}
 
+	// Context를 활용한 연결 테스트 (타임아웃: 10초)
+	pingCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
 	// 연결 테스트
-	if err := db.Ping(); err != nil {
-		db.Close()
+	if err := db.PingContext(pingCtx); err != nil {
+		_ = db.Close()
 		return nil, fmt.Errorf("데이터베이스 연결 확인 실패: %v", err)
 	}
+
+	// 커넥션 풀 설정
+	db.SetMaxOpenConns(10)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(time.Hour)
 
 	return db, nil
 }
