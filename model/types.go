@@ -38,3 +38,10 @@ type UserTotalAsset struct {
 	Rank       int
 	Tier       int
 }
+
+// UpdateFlags 업데이트 필요 상태 나타내는 구조체
+type UpdateFlags struct {
+	Season bool
+	Split  bool
+	Coin   bool
+}
