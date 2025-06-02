@@ -115,7 +115,13 @@ func Main(obj map[string]interface{}) map[string]interface{} {
 
 	// 5-3. 유저 자산 업데이트 수행
 	if flags.Split {
-		// 유저 자산 업데이트 수행
+		log.Println("유저 자산 업데이트 시작")
+		err = service.UpdateSplit(ctx, db)
+		if err != nil {
+			return makeMessage(fmt.Sprintf("유저 자산 업데이트 실패: %v", err))
+		} else {
+			log.Println("유저 자산 업데이트 완료")
+		}
 	}
 
 	// 5-4. 랭킹 업데이트 수행
