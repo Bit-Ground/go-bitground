@@ -270,8 +270,12 @@ func filterInvalidInsights(insights []Insight, symbolMap map[string]int) []Insig
 func insertInsights(ctx context.Context, db *sql.DB, insights []Insight) error {
 	now := time.Now()
 
+	// 쿼리 타임아웃 설정 (20초)
+	queryCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+
 	// 트랜잭션 시작
-	tx, err := db.BeginTx(ctx, nil)
+	tx, err := db.BeginTx(queryCtx, nil)
 	if err != nil {
 		return fmt.Errorf("트랜잭션 시작 에러: %w", err)
 	}
@@ -280,14 +284,7 @@ func insertInsights(ctx context.Context, db *sql.DB, insights []Insight) error {
 			_ = tx.Rollback()
 			panic(p) // 패닉 다시 던지기
 		}
-		if err != nil { // 함수 종료 시 err가 nil이 아니면 롤백
-			_ = tx.Rollback()
-		}
 	}()
-
-	// 쿼리 타임아웃 설정 (20초)
-	queryCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	defer cancel()
 
 	query := `
 		INSERT INTO ai_insights (symbol, insight, score, date)
@@ -309,7 +306,7 @@ func insertInsights(ctx context.Context, db *sql.DB, insights []Insight) error {
 
 	for _, insight := range insights {
 
-		_, err := stmt.ExecContext(queryCtx, insight.Symbol, insight.Insight, insight.Score, now)
+		_, err := stmt.ExecContext(queryCtx, insight.Symbol, insight.Insight, insight.Score, now.Format("2006-01-02"))
 		if err != nil {
 			_ = tx.Rollback() // 쿼리 실행 실패 시 롤백
 			return fmt.Errorf("데이터베이스 삽입 에러: %w", err)
