@@ -38,7 +38,7 @@ func TimeCheck(obj map[string]interface{}) (model.UpdateFlags, error) {
 	day := now.Day()
 	hour := now.Hour()
 
-	var coinUpdate, seasonUpdate, splitUpdate bool
+	var coinUpdate, seasonUpdate, splitUpdate, insightUpdate bool
 
 	if chkType == "dev" {
 		coinUpdate = true
@@ -51,9 +51,15 @@ func TimeCheck(obj map[string]interface{}) (model.UpdateFlags, error) {
 			splitUpdate = day == 8 || day == 23
 		}
 	}
+
+	if hour == 0 {
+		insightUpdate = true
+	}
+
 	return model.UpdateFlags{
-		Season: seasonUpdate,
-		Split:  splitUpdate,
-		Coin:   coinUpdate,
+		Season:  seasonUpdate,
+		Split:   splitUpdate,
+		Coin:    coinUpdate,
+		Insight: insightUpdate,
 	}, nil
 }

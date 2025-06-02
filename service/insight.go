@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"regexp"
 	"strings"
@@ -43,25 +44,29 @@ type Insight struct {
 	Insight string `json:"insight"`
 	Score   int    `json:"score"`
 }
-type ModelOutput []Insight // ModelOutput을 Insight 슬라이스 타입으로 재정의
 
-func UpdateInsight(ctx context.Context, db *sql.DB, geminiKey string) error {
-	test, err := getInsightData(ctx, geminiKey)
+func UpdateInsight(ctx context.Context, db *sql.DB, geminiKey string, symbolMap map[string]int) error {
+	// 1. Gemini API를 사용하여 인사이트 데이터를 가져옵니다.
+	insights, err := getInsightData(ctx, geminiKey, symbolMap)
 	if err != nil {
-		return fmt.Errorf("getInsightData 에러: %v", err)
+		return fmt.Errorf("getInsightData 에러: %w", err)
 	}
 
-	// 인사이트 데이터를 JSON으로 변환
-	jsonData, err := json.Marshal(test)
-	if err != nil {
-		return fmt.Errorf("JSON 인코딩 에러: %v", err)
+	if len(insights) == 0 {
+		return fmt.Errorf("인사이트 데이터가 비어 있습니다. Gemini API 응답을 확인하세요")
 	}
-	fmt.Println(string(jsonData))
+
+	// 2. 인사이트 데이터를 데이터베이스에 삽입합니다.
+	err = insertInsights(ctx, db, insights)
+	if err != nil {
+		return fmt.Errorf("insertInsights 에러: %w", err)
+	}
+
 	return nil
 }
 
 // gemini api를 사용하여 인사이트 데이터를 가져오는 함수
-func getInsightData(ctx context.Context, geminiKey string) (ModelOutput, error) {
+func getInsightData(ctx context.Context, geminiKey string, symbolMap map[string]int) ([]Insight, error) {
 	const apiURL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent"
 
 	// 프롬프트 생성
@@ -80,7 +85,7 @@ func getInsightData(ctx context.Context, geminiKey string) (ModelOutput, error) 
 
 	jsonBody, err := json.Marshal(requestBody)
 	if err != nil {
-		return ModelOutput{}, fmt.Errorf("JSON 인코딩 오류: %v", err)
+		return []Insight{}, fmt.Errorf("JSON 인코딩 오류: %w", err)
 	}
 
 	// Context를 활용한 HTTP 요청 (타임아웃: 3분)
@@ -90,39 +95,42 @@ func getInsightData(ctx context.Context, geminiKey string) (ModelOutput, error) 
 	// HTTP 요청 생성
 	req, err := http.NewRequestWithContext(reqCtx, "POST", apiURL+"?key="+geminiKey, bytes.NewBuffer(jsonBody))
 	if err != nil {
-		return ModelOutput{}, fmt.Errorf("HTTP 요청 생성 에러: %v", err)
+		return []Insight{}, fmt.Errorf("HTTP 요청 생성 에러: %w", err)
 	}
 
 	// http 클라이언트 생성
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		return ModelOutput{}, fmt.Errorf("API 요청 에러: %v", err)
+		return []Insight{}, fmt.Errorf("API 요청 에러: %w", err)
 	}
 	defer func(Body io.ReadCloser) {
-		_ = Body.Close()
+		// 응답 본문 닫기
+		if err := Body.Close(); err != nil {
+			log.Printf("응답 본문 닫기 에러: %v\n", err)
+		}
 	}(resp.Body)
 
 	// 응답 본문 읽기
 	bodyBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return ModelOutput{}, fmt.Errorf("응답 본문 읽기 에러: %v", err)
+		return []Insight{}, fmt.Errorf("응답 본문 읽기 에러: %w", err)
 	}
 
 	// HTTP 응답 상태 코드 확인
 	if resp.StatusCode != http.StatusOK {
-		return ModelOutput{}, fmt.Errorf("API 요청 실패: 상태 코드 %d, 응답: %s", resp.StatusCode, string(bodyBytes))
+		return []Insight{}, fmt.Errorf("API 요청 실패: 상태 코드 %d, 응답: %s", resp.StatusCode, string(bodyBytes))
 	}
 
 	// 응답 본문 파싱
 	var responseBody ResponseBody
 	err = json.Unmarshal(bodyBytes, &responseBody)
 	if err != nil {
-		return ModelOutput{}, fmt.Errorf("JSON 디코딩 에러: %v", err)
+		return []Insight{}, fmt.Errorf("JSON 디코딩 에러: %w", err)
 	}
 
 	// 응답에서 모델 출력 추출
-	var insights ModelOutput
+	var insights []Insight
 	if len(responseBody.Candidates) > 0 && len(responseBody.Candidates[0].Content.Parts) > 0 {
 		generatedText := responseBody.Candidates[0].Content.Parts[0].Text // 첫 번째 Part의 텍스트 가져오기
 
@@ -147,9 +155,13 @@ func getInsightData(ctx context.Context, geminiKey string) (ModelOutput, error) 
 			return nil, fmt.Errorf("모델 응답 JSON 파싱 오류: %v\n원본 텍스트(정제 후): `%s`", err, cleanedText)
 		}
 	} else {
-		return ModelOutput{}, fmt.Errorf("모델 응답에 유효한 데이터가 없습니다. 응답: %s", string(bodyBytes))
+		return []Insight{}, fmt.Errorf("모델 응답에 유효한 데이터가 없습니다. 응답: %s", string(bodyBytes))
 	}
-	return insights, nil
+
+	// 유효하지 않은 인사이트 필터링
+	newInsights := filterInvalidInsights(insights, symbolMap)
+
+	return newInsights, nil
 }
 
 // 프롬프트 생성
@@ -236,4 +248,75 @@ func createPrompt() string {
 	`, now, now, now, now)
 
 	return prompt
+}
+
+// 유효하지 않은 인사이트 데이터를 필터링
+func filterInvalidInsights(insights []Insight, symbolMap map[string]int) []Insight {
+	var newInsights []Insight
+	for i, insight := range insights {
+		if i < 4 { // 첫 번째 4개 인사이트는 전체 시장 분석이므로 무조건 추가
+			newInsights = append(newInsights, insight)
+			continue
+		}
+		// 심볼이 symbolMap에 존재하는지 확인
+		if symbolMap[insight.Symbol] != 0 {
+			newInsights = append(newInsights, insight)
+		}
+	}
+	return newInsights
+}
+
+// 삽입 쿼리 수행
+func insertInsights(ctx context.Context, db *sql.DB, insights []Insight) error {
+	now := time.Now()
+
+	// 트랜잭션 시작
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("트랜잭션 시작 에러: %w", err)
+	}
+	defer func() {
+		if p := recover(); p != nil { // 패닉 발생 시 롤백
+			_ = tx.Rollback()
+			panic(p) // 패닉 다시 던지기
+		}
+	}()
+
+	// 쿼리 타임아웃 설정 (20초)
+	queryCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+
+	query := `
+		INSERT INTO ai_insights (symbol, insight, score, date)
+		VALUES (?, ?, ?, ?)
+		ON DUPLICATE KEY UPDATE
+			insight = VALUES(insight),
+			score = VALUES(score)
+	`
+	stmt, err := tx.PrepareContext(queryCtx, query)
+	if err != nil {
+		_ = tx.Rollback() // 쿼리 준비 실패 시 롤백
+		return fmt.Errorf("쿼리 준비 에러: %w", err)
+	}
+	defer func() {
+		if err := stmt.Close(); err != nil {
+			log.Printf("쿼리 종료 에러: %v\n", err)
+		}
+	}()
+
+	for _, insight := range insights {
+
+		_, err := stmt.ExecContext(queryCtx, insight.Symbol, insight.Insight, insight.Score, now)
+		if err != nil {
+			_ = tx.Rollback() // 쿼리 실행 실패 시 롤백
+			return fmt.Errorf("데이터베이스 삽입 에러: %w", err)
+		}
+	}
+
+	// 모든 작업이 성공적으로 완료되었으므로 커밋 시도
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("트랜잭션 커밋 에러: %w", err)
+	}
+
+	return nil
 }
