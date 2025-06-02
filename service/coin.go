@@ -7,65 +7,48 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"golang.org/x/sync/errgroup"
 	"io"
 	"log"
 	"net/http"
-	"sync"
 	"time"
 )
 
 func UpdateCoins(ctx context.Context, db *sql.DB) error {
 	// 고루틴 사용
-	symbolListChan := make(chan []model.UpbitCoinList, 1)
-	coinDetailChan := make(chan map[string]model.UpbitCoinPrice, 1)
-	errChan := make(chan error, 2)
+	var coinList []model.UpbitCoinList
+	var coinDetailList map[string]model.UpbitCoinPrice
 
-	var wg sync.WaitGroup
-	wg.Add(2)
-
-	// 1. api에서 코인 정보를 가져와 "KRW-" 로 시작하는 코인 심볼을 필터링 (비동기)
-	go func() {
-		defer wg.Done()
-		symbols, err := getSymbolList(ctx)
+	g, gCtx := errgroup.WithContext(ctx)
+	// 1. API에서 코인 정보를 가져와 "KRW-"로 시작하는 코인 심볼을 필터링 (비동기)
+	g.Go(func() error {
+		symbols, err := getSymbolList(gCtx) // gCtx를 사용
 		if err != nil {
-			errChan <- fmt.Errorf("getSymbolList 에러: %w", err)
-			return
+			return fmt.Errorf("getSymbolList 에러: %w", err)
 		}
-		symbolListChan <- symbols
-	}()
+		coinList = symbols // 결과 저장
+		return nil
+	})
 
 	// 2. 심볼에 해당하는 코인 정보들 가져오기
-	// 3. db에서 코인 심볼 목록을 조회하여 is_deleted 업데이트
-	go func() {
-		defer wg.Done()
-		details, err := getCoinDetails(ctx)
+	// 3. DB에서 코인 심볼 목록을 조회하여 is_deleted 업데이트
+	g.Go(func() error {
+		details, err := getCoinDetails(gCtx) // gCtx를 사용
 		if err != nil {
-			errChan <- fmt.Errorf("getCoinDetails 에러: %w", err)
-			return
+			return fmt.Errorf("getCoinDetails 에러: %w", err)
 		}
-		if err := updateDeletedVal(ctx, db, details); err != nil {
-			errChan <- fmt.Errorf("updateDeletedVal 에러: %w", err)
-			return
+		// getCoinDetails가 성공적으로 완료된 후에 updateDeletedVal을 호출합니다.
+		if err := updateDeletedVal(gCtx, db, details); err != nil { // gCtx를 사용
+			return fmt.Errorf("updateDeletedVal 에러: %w", err)
 		}
-		coinDetailChan <- details
-	}()
+		coinDetailList = details // 결과 저장
+		return nil
+	})
 
-	// 고루틴들이 완료될 때까지 대기
-	wg.Wait()
-	close(symbolListChan)
-	close(coinDetailChan)
-	close(errChan)
-
-	// 에러 처리
-	for err := range errChan {
-		if err != nil {
-			return fmt.Errorf("고루틴 수행 중 에러 발생: %w", err)
-		}
+	if err := g.Wait(); err != nil {
+		// 에러가 발생하면 여기서 처리하고 함수를 종료합니다.
+		return fmt.Errorf("고루틴 수행 중 에러 발생: %w", err)
 	}
-
-	// 결과 처리
-	coinList := <-symbolListChan
-	coinDetailList := <-coinDetailChan
 
 	// 4. 데이터들을 가공하여 db에 저장할 수 있는 형태로 변환
 	coinSymbols := prepareCoinSymbols(coinList, coinDetailList)
@@ -197,8 +180,12 @@ func prepareCoinSymbols(coinList []model.UpbitCoinList, coinDetailList map[strin
 // coinDetailList에 있는데 is_deleted가 true라면 false로 업데이트
 // coinDetailList에 없는데 is_deleted가 false라면 true로 업데이트
 func updateDeletedVal(ctx context.Context, db *sql.DB, coinDetailList map[string]model.UpbitCoinPrice) error {
+	// 쿼리 타임아웃 설정 (20초)
+	queryCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+
 	// 트랜잭션 시작
-	tx, err := db.BeginTx(ctx, nil)
+	tx, err := db.BeginTx(queryCtx, nil)
 	if err != nil {
 		return fmt.Errorf("트랜잭션 시작 에러: %w", err)
 	}
@@ -207,14 +194,7 @@ func updateDeletedVal(ctx context.Context, db *sql.DB, coinDetailList map[string
 			_ = tx.Rollback()
 			panic(p) // 패닉 다시 던지기
 		}
-		if err != nil { // 함수 종료 시 err가 nil이 아니면 롤백
-			_ = tx.Rollback()
-		}
 	}()
-
-	// 쿼리 타임아웃 설정 (20초)
-	queryCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	defer cancel()
 
 	query := `
 		SELECT symbol, is_deleted
@@ -303,8 +283,13 @@ func updateDeletedVal(ctx context.Context, db *sql.DB, coinDetailList map[string
 
 // db에 코인 심볼 목록을 저장합니다.
 func insertCoinSymbols(ctx context.Context, db *sql.DB, coinSymbols []model.CoinSymbol) error {
+
+	// 쿼리 타임아웃 설정 (10초)
+	queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
 	// 트랜잭션 시작
-	tx, err := db.BeginTx(ctx, nil)
+	tx, err := db.BeginTx(queryCtx, nil)
 	if err != nil {
 		return fmt.Errorf("트랜잭션 시작 에러: %w", err)
 	}
@@ -313,14 +298,7 @@ func insertCoinSymbols(ctx context.Context, db *sql.DB, coinSymbols []model.Coin
 			_ = tx.Rollback()
 			panic(p) // 패닉 다시 던지기
 		}
-		if err != nil { // 함수 종료 시 err가 nil이 아니면 롤백
-			_ = tx.Rollback()
-		}
 	}()
-
-	// 쿼리 타임아웃 설정 (10초)
-	queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
 
 	query := `
 		INSERT INTO coins (symbol, korean_name, trade_price_24h, change_rate, is_caution, is_warning)

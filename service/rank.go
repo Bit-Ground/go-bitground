@@ -7,11 +7,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"golang.org/x/sync/errgroup"
 	"io"
 	"log"
 	"net/http"
 	"sort"
-	"sync"
 	"time"
 )
 
@@ -37,51 +37,39 @@ func UpdateRank(ctx context.Context, db *sql.DB, symbolMap map[string]int, seaso
 	}
 
 	// 고루틴 사용하여 병렬 처리
-	cashMapChan := make(chan map[int]int, 1)
-	assetsMapChan := make(chan map[int][]model.UserAsset, 1)
-	errChan := make(chan error, 2)
+	g, gCtx := errgroup.WithContext(ctx)
 
-	var wg sync.WaitGroup
-	wg.Add(2) // 2개의 고루틴을 사용하여 현금과 자산 정보를 병렬로 조회
+	var userCashMap map[int]int
+	var userAssetsMap map[int][]model.UserAsset
 
 	// 3. 모든 유저의 현금 정보 조회 (비동기)
-	go func() {
-		defer wg.Done()
-		cash, getCashErr := getUserCashMap(ctx, db, userIDs)
+	g.Go(func() error {
+		// gCtx를 사용하여 컨텍스트 취소 신호를 받으면 작업을 중단할 수 있습니다.
+		cash, getCashErr := getUserCashMap(gCtx, db, userIDs)
 		if getCashErr != nil {
-			errChan <- fmt.Errorf("유저 현금 정보 조회 실패: %w", getCashErr)
-			return
+			return fmt.Errorf("유저 현금 정보 조회 실패: %w", getCashErr)
 		}
-		cashMapChan <- cash
-	}()
+		userCashMap = cash // 결과 저장
+		return nil
+	})
 
 	// 4. 모든 유저의 자산 정보 조회 (비동기)
-	go func() {
-		defer wg.Done()
-		assets, getAssetsErr := getUserAssetsMap(ctx, db, userIDs)
+	g.Go(func() error {
+		// gCtx를 사용하여 컨텍스트 취소 신호를 받으면 작업을 중단할 수 있습니다.
+		assets, getAssetsErr := getUserAssetsMap(gCtx, db, userIDs)
 		if getAssetsErr != nil {
-			errChan <- fmt.Errorf("유저 자산 정보 조회 실패: %w", getAssetsErr)
-			return
+			return fmt.Errorf("유저 자산 정보 조회 실패: %w", getAssetsErr)
 		}
-		assetsMapChan <- assets
-	}()
+		userAssetsMap = assets // 결과 저장
+		return nil
+	})
 
-	// 고루틴이 완료될 때까지 대기
-	wg.Wait()
-	close(cashMapChan)
-	close(assetsMapChan)
-	close(errChan)
-
-	// 에러 처리
-	for err := range errChan {
-		if err != nil {
-			return fmt.Errorf("고루틴 수행 중 에러 발생: %w", err)
-		}
+	// g.Wait()는 모든 고루틴이 완료될 때까지 기다리거나,
+	// 고루틴 중 하나라도 에러를 반환하면 즉시 해당 에러를 반환합니다.
+	if err := g.Wait(); err != nil {
+		// 에러가 발생하면 여기서 처리하고 함수를 종료합니다.
+		return fmt.Errorf("고루틴 수행 중 에러 발생: %w", err)
 	}
-
-	// 채널에서 결과 가져오기
-	userCashMap := <-cashMapChan
-	userAssetsMap := <-assetsMapChan
 
 	// 5. 각 유저의 총 자산 계산
 	var userTotalAssets []model.UserTotalAsset
@@ -392,8 +380,12 @@ func calculateTier(rank, totalUsers int) int {
 
 // 유저 랭킹 정보 업데이트
 func updateUserRankings(ctx context.Context, db *sql.DB, userTotalAssets []model.UserTotalAsset, seasonID int) error {
+	// 쿼리 타임아웃 설정 (30초)
+	queryCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
 	// 트랜잭션 시작
-	tx, err := db.BeginTx(ctx, nil)
+	tx, err := db.BeginTx(queryCtx, nil)
 	if err != nil {
 		return fmt.Errorf("트랜잭션 시작 에러: %w", err)
 	}
@@ -402,14 +394,7 @@ func updateUserRankings(ctx context.Context, db *sql.DB, userTotalAssets []model
 			_ = tx.Rollback()
 			panic(p) // 패닉 다시 던지기
 		}
-		if err != nil { // 함수 종료 시 err가 nil이 아니면 롤백
-			_ = tx.Rollback()
-		}
 	}()
-
-	// 쿼리 타임아웃 설정 (30초)
-	queryCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
 
 	query := `
 		INSERT INTO user_rankings (season_id, user_id, total_value, ranks, tier)

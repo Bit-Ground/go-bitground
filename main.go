@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"fmt"
 	"github.com/joho/godotenv"
+	"golang.org/x/sync/errgroup"
 	"log"
 	"os"
 	"time"
@@ -29,6 +30,7 @@ func main() {
 	obj["TYPE"] = os.Getenv("TYPE")
 	obj["TEST_TIME"] = os.Getenv("TEST_TIME")
 	obj["GOOGLE_API_KEY"] = os.Getenv("GOOGLE_API_KEY")
+	obj["SEASON_NAME"] = os.Getenv("SEASON_NAME")
 
 	Main(obj)
 }
@@ -54,15 +56,17 @@ func Main(obj map[string]interface{}) map[string]interface{} {
 	}(db)
 
 	// 2. 마켓 인덱스 업데이트 (비동기)
-	marketIndexDone := make(chan error, 1)
-	go func() {
+	g, gCtx := errgroup.WithContext(ctx)
+
+	g.Go(func() error {
 		log.Println("마켓 인덱스 업데이트 시작")
-		err := service.UpdateMarketIndex(ctx, db)
+		err := service.UpdateMarketIndex(gCtx, db)
 		if err != nil {
-			log.Printf("마켓 인덱스 업데이트 실패: %v\n", err)
+			return fmt.Errorf("마켓 인덱스 업데이트 실패: %w", err)
 		}
-		marketIndexDone <- err
-	}()
+		log.Println("마켓 인덱스 업데이트 완료")
+		return nil
+	})
 
 	// 3-1. db에서 코인 심볼 조회하여 심볼 맵 생성
 	symbolMap, err := service.GetActiveCoinsSymbols(ctx, db)
@@ -86,21 +90,20 @@ func Main(obj map[string]interface{}) map[string]interface{} {
 	log.Printf("업데이트 플래그: %+v\n", flags)
 
 	// 5-1. 인사이트 업데이트 (비동기)
-	geminiKey := obj["GOOGLE_API_KEY"].(string)
-	insightDone := make(chan error, 1)
-	go func() {
-		var err error
+	g.Go(func() error {
 		if flags.Insight {
+			geminiKey := obj["GOOGLE_API_KEY"].(string)
 			log.Println("인사이트 업데이트 시작")
-			err = service.UpdateInsight(ctx, db, geminiKey, symbolMap)
+			err := service.UpdateInsight(gCtx, db, geminiKey, symbolMap)
 			if err != nil {
-				log.Printf("인사이트 업데이트 실패: %v\n", err)
+				return fmt.Errorf("인사이트 업데이트 실패: %w", err)
 			}
+			log.Println("인사이트 업데이트 완료")
 		} else {
 			log.Println("인사이트 업데이트 생략")
 		}
-		insightDone <- err
-	}()
+		return nil
+	})
 
 	// 5-2. 코인 업데이트 수행
 	if flags.Coin {
@@ -135,21 +138,18 @@ func Main(obj map[string]interface{}) map[string]interface{} {
 
 	// 5-5. 시즌 업데이트 수행
 	if flags.Season {
-		// 시즌 업데이트 수행
+		log.Println("시즌 업데이트 시작")
+		err = service.UpdateSeason(ctx, db, seasonID, obj)
+		if err != nil {
+			return makeMessage(fmt.Sprintf("시즌 업데이트 실패: %v", err))
+		} else {
+			log.Println("시즌 업데이트 완료")
+		}
 	}
 
-	// 종료 전 1. 마켓 인덱스 업데이트 완료 대기
-	if err := <-marketIndexDone; err != nil {
-		return makeMessage(fmt.Sprintf("마켓 인덱스 업데이트 실패: %v", err))
-	} else {
-		log.Println("마켓 인덱스 업데이트 완료")
-	}
-
-	// 종료 전 2. 인사이트 업데이트 완료 대기
-	if err := <-insightDone; err != nil {
-		return makeMessage(fmt.Sprintf("인사이트 업데이트 실패: %v", err))
-	} else {
-		log.Println("인사이트 업데이트 완료")
+	// 종료 전 고루틴 대기
+	if err := g.Wait(); err != nil {
+		return makeMessage(fmt.Sprintf("고루틴 수행 중 에러 발생: %v", err))
 	}
 
 	// 성공 메시지 생성
