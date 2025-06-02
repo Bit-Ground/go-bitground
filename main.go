@@ -95,6 +95,8 @@ func Main(obj map[string]interface{}) map[string]interface{} {
 			if err != nil {
 				log.Printf("인사이트 업데이트 실패: %v\n", err)
 			}
+		} else {
+			log.Println("인사이트 업데이트 생략")
 		}
 		insightDone <- err
 	}()
