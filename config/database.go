@@ -47,7 +47,9 @@ func ConnectDB(ctx context.Context, cfg DBConfig) (*sql.DB, error) {
 
 	// 연결 테스트
 	if err := db.PingContext(pingCtx); err != nil {
-		_ = db.Close()
+		if err := db.Close(); err != nil {
+			return nil, fmt.Errorf("데이터베이스 연결 종료 실패: %v", err)
+		}
 		return nil, fmt.Errorf("데이터베이스 연결 확인 실패: %v", err)
 	}
 

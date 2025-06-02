@@ -1,21 +1,15 @@
 package model
 
-// UpbitCoinPrice api 응답으로 받아온 현 코인 시세
-type UpbitCoinPrice struct {
-	Market     string  `json:"market"`
-	TradePrice float64 `json:"trade_price"`
-}
-
-// CoinPrice 현 코인 시세 구조체
-type CoinPrice struct {
-	SymbolId   int     `json:"symbol_id"`
-	TradePrice float64 `json:"trade_price"`
-}
-
 // CoinSymbol 코인 심볼 구조체
 type CoinSymbol struct {
 	Id     int    `db:"id"`
 	Symbol string `db:"symbol"`
+}
+
+// UpbitCoinPrice api 응답으로 받아온 현 코인 시세
+type UpbitCoinPrice struct {
+	Market     string  `json:"market"`
+	TradePrice float64 `json:"trade_price"`
 }
 
 // UserCash 유저 현금 구조체
@@ -41,7 +35,8 @@ type UserTotalAsset struct {
 
 // UpdateFlags 업데이트 필요 상태 나타내는 구조체
 type UpdateFlags struct {
-	Season bool
-	Split  bool
-	Coin   bool
+	Season  bool
+	Split   bool
+	Coin    bool
+	Insight bool
 }
