@@ -2,14 +2,41 @@ package model
 
 // CoinSymbol 코인 심볼 구조체
 type CoinSymbol struct {
-	Id     int    `db:"id"`
-	Symbol string `db:"symbol"`
+	Id         int     `db:"id"`
+	Symbol     string  `db:"symbol"`
+	ChangeRate float64 `db:"change_rate"`
+	IsCaution  bool    `db:"is_caution"`
+	IsWarning  bool    `db:"is_warning"`
+	IsDeleted  bool    `db:"is_deleted"`
+	KoreanName string  `db:"korean_name"`
+	TradePrice int64   `db:"trade_price_24h"`
+}
+
+// UpbitCoinList Upbit API에서 사용하는 코인 마켓 리스트 구조체
+type UpbitCoinList struct {
+	Market      string      `json:"market"`
+	KoreanName  string      `json:"korean_name"`
+	MarketEvent MarketEvent `json:"market_event"`
+}
+
+// MarketEvent Upbit API에서 사용하는 마켓 이벤트 구조체
+type MarketEvent struct {
+	Warning bool `json:"warning"`
+	Caution struct {
+		PriceFluctuations            bool `json:"PRICE_FLUCTUATIONS"`
+		TradingVolumeSoaring         bool `json:"TRADING_VOLUME_SOARING"`
+		DepositAmountSoaring         bool `json:"DEPOSIT_AMOUNT_SOARING"`
+		GlobalPriceDifferences       bool `json:"GLOBAL_PRICE_DIFFERENCES"`
+		ConcentrationOfSmallAccounts bool `json:"CONCENTRATION_OF_SMALL_ACCOUNTS"`
+	} `json:"caution"`
 }
 
 // UpbitCoinPrice api 응답으로 받아온 현 코인 시세
 type UpbitCoinPrice struct {
-	Market     string  `json:"market"`
-	TradePrice float64 `json:"trade_price"`
+	Market           string  `json:"market"`
+	TradePrice       float64 `json:"trade_price"`
+	AccTradePrice    float64 `json:"acc_trade_price_24h"`
+	PrevClosingPrice float64 `json:"prev_closing_price"`
 }
 
 // UserCash 유저 현금 구조체

@@ -13,6 +13,7 @@ import (
 	"time"
 )
 
+// 배포 시 주석
 func main() {
 	err := godotenv.Load()
 	if err != nil {
@@ -103,7 +104,13 @@ func Main(obj map[string]interface{}) map[string]interface{} {
 
 	// 5-2. 코인 업데이트 수행
 	if flags.Coin {
-		// 코인 업데이트 수행
+		log.Println("코인 업데이트 시작")
+		err = service.UpdateCoins(ctx, db)
+		if err != nil {
+			return makeMessage(fmt.Sprintf("코인 업데이트 실패: %v", err))
+		} else {
+			log.Println("코인 업데이트 완료")
+		}
 	}
 
 	// 5-3. 유저 자산 업데이트 수행

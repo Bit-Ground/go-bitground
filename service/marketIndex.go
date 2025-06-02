@@ -88,15 +88,9 @@ func getMarketCap(ctx context.Context) ([]GeckoCoin, error) {
 		}
 	}(resp.Body)
 
-	// 응답 본문 읽기
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("응답 본문 읽기 에러: %w", err)
-	}
-
 	// JSON 응답을 Coin 슬라이스로 디코딩
 	var coins []GeckoCoin
-	err = json.Unmarshal(body, &coins)
+	err = json.NewDecoder(resp.Body).Decode(&coins)
 	if err != nil {
 		return nil, fmt.Errorf("JSON 디코딩 에러: %w", err)
 	}
