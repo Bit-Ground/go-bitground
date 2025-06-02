@@ -75,7 +75,7 @@ func UpdateRank(ctx context.Context, db *sql.DB, symbolMap map[string]int, seaso
 	// 에러 처리
 	for err := range errChan {
 		if err != nil {
-			return err
+			return fmt.Errorf("고루틴 수행 중 에러 발생: %w", err)
 		}
 	}
 
@@ -402,6 +402,9 @@ func updateUserRankings(ctx context.Context, db *sql.DB, userTotalAssets []model
 			_ = tx.Rollback()
 			panic(p) // 패닉 다시 던지기
 		}
+		if err != nil { // 함수 종료 시 err가 nil이 아니면 롤백
+			_ = tx.Rollback()
+		}
 	}()
 
 	// 쿼리 타임아웃 설정 (30초)
@@ -438,6 +441,7 @@ func updateUserRankings(ctx context.Context, db *sql.DB, userTotalAssets []model
 
 	// 모든 작업이 성공적으로 완료되었으므로 커밋 시도
 	if err := tx.Commit(); err != nil {
+		_ = tx.Rollback() // 트랜잭션 커밋 실패 시 롤백
 		return fmt.Errorf("트랜잭션 커밋 에러: %w", err)
 	}
 
