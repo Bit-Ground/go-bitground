@@ -60,9 +60,11 @@ func seasonClose(ctx context.Context, db *sql.DB, seasonID int, seasonName, chkT
 		return fmt.Errorf("트랜잭션 시작 에러: %w", err)
 	}
 	defer func() {
-		if p := recover(); p != nil { // 패닉 발생 시 롤백
+		if p := recover(); p != nil {
 			_ = tx.Rollback()
-			panic(p) // 패닉 다시 던지기
+			panic(p)
+		} else if err != nil {
+			_ = tx.Rollback()
 		}
 	}()
 
@@ -73,14 +75,12 @@ func seasonClose(ctx context.Context, db *sql.DB, seasonID int, seasonName, chkT
 	if errors.Is(err, sql.ErrNoRows) {
 		ogSeasonName = "초기화 시즌 1"
 	} else if err != nil {
-		_ = tx.Rollback() // 쿼리 실행 실패 시 롤백
 		return fmt.Errorf("시즌 이름 조회 실패: %w", err)
 	}
 
 	// processSeasonStrings 함수를 호출하여 새로운 시즌 이름을 생성
 	newSeasonName, err := processSeasonStrings(seasonName, ogSeasonName)
 	if err != nil {
-		_ = tx.Rollback() // 에러 발생 시 롤백
 		return fmt.Errorf("시즌 이름 처리 실패: %w", err)
 	}
 
@@ -93,7 +93,6 @@ func seasonClose(ctx context.Context, db *sql.DB, seasonID int, seasonName, chkT
 
 	_, err = tx.ExecContext(queryCtx, updateQuery, seasonID)
 	if err != nil {
-		_ = tx.Rollback() // 쿼리 실행 실패 시 롤백
 		return fmt.Errorf("시즌 상태 업데이트 실패: %w", err)
 	}
 
@@ -123,17 +122,10 @@ func seasonClose(ctx context.Context, db *sql.DB, seasonID int, seasonName, chkT
 
 	_, err = tx.ExecContext(queryCtx, insertQuery, newSeasonName, startAt.Format("2006-01-02"), endAt.Format("2006-01-02"))
 	if err != nil {
-		_ = tx.Rollback() // 쿼리 실행 실패 시 롤백
 		return fmt.Errorf("새 시즌 생성 실패: %w", err)
 	}
 
-	// 트랜잭션 커밋
-	if err := tx.Commit(); err != nil {
-		_ = tx.Rollback() // 트랜잭션 커밋 실패 시 롤백
-		return fmt.Errorf("트랜잭션 커밋 에러: %w", err)
-	}
-
-	return nil
+	return tx.Commit() // 트랜잭션 커밋
 }
 
 // processSeasonStrings 함수는 문자열 a와 b를 비교하여 새로운 문자열 c를 반환합니다.

@@ -54,8 +54,8 @@ func ConnectDB(ctx context.Context, cfg DBConfig) (*sql.DB, error) {
 	}
 
 	// 커넥션 풀 설정
-	db.SetMaxOpenConns(10)
-	db.SetMaxIdleConns(5)
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(10)
 	db.SetConnMaxLifetime(time.Hour)
 
 	return db, nil
