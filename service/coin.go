@@ -190,9 +190,11 @@ func updateDeletedVal(ctx context.Context, db *sql.DB, coinDetailList map[string
 		return fmt.Errorf("트랜잭션 시작 에러: %w", err)
 	}
 	defer func() {
-		if p := recover(); p != nil { // 패닉 발생 시 롤백
+		if p := recover(); p != nil {
 			_ = tx.Rollback()
-			panic(p) // 패닉 다시 던지기
+			panic(p)
+		} else if err != nil {
+			_ = tx.Rollback()
 		}
 	}()
 
@@ -204,7 +206,6 @@ func updateDeletedVal(ctx context.Context, db *sql.DB, coinDetailList map[string
 	// 쿼리 실행
 	rows, err := tx.QueryContext(queryCtx, query)
 	if err != nil {
-		_ = tx.Rollback() // 쿼리 실행 실패 시 롤백
 		return fmt.Errorf("쿼리 실행 에러: %w", err)
 	}
 	defer func(rows *sql.Rows) {
@@ -251,7 +252,6 @@ func updateDeletedVal(ctx context.Context, db *sql.DB, coinDetailList map[string
 			util.GeneratePlaceholders(len(symbolsToSetTrue)))
 
 		if _, err := tx.ExecContext(queryCtx, updateQuery, args...); err != nil {
-			_ = tx.Rollback() // is_deleted = true 업데이트 실패 시 롤백
 			return fmt.Errorf("is_deleted = true 업데이트 에러: %w", err)
 		}
 	}
@@ -267,18 +267,11 @@ func updateDeletedVal(ctx context.Context, db *sql.DB, coinDetailList map[string
 			util.GeneratePlaceholders(len(symbolsToSetFalse)))
 
 		if _, err := tx.ExecContext(queryCtx, updateQuery, args...); err != nil {
-			_ = tx.Rollback() // is_deleted = false 업데이트 실패 시 롤백
 			return fmt.Errorf("is_deleted = false 업데이트 에러: %w", err)
 		}
 	}
 
-	// 트랜잭션 커밋
-	if err := tx.Commit(); err != nil {
-		_ = tx.Rollback() // 트랜잭션 커밋 실패 시 롤백
-		return fmt.Errorf("트랜잭션 커밋 에러: %w", err)
-	}
-
-	return nil
+	return tx.Commit() // 트랜잭션 커밋
 }
 
 // db에 코인 심볼 목록을 저장합니다.
@@ -294,9 +287,11 @@ func insertCoinSymbols(ctx context.Context, db *sql.DB, coinSymbols []model.Coin
 		return fmt.Errorf("트랜잭션 시작 에러: %w", err)
 	}
 	defer func() {
-		if p := recover(); p != nil { // 패닉 발생 시 롤백
+		if p := recover(); p != nil {
 			_ = tx.Rollback()
-			panic(p) // 패닉 다시 던지기
+			panic(p)
+		} else if err != nil {
+			_ = tx.Rollback()
 		}
 	}()
 
@@ -312,7 +307,6 @@ func insertCoinSymbols(ctx context.Context, db *sql.DB, coinSymbols []model.Coin
 	`
 	stmt, err := tx.PrepareContext(queryCtx, query)
 	if err != nil {
-		_ = tx.Rollback() // 쿼리 준비 실패 시 롤백
 		return fmt.Errorf("쿼리 준비 에러: %w", err)
 	}
 	defer func() {
@@ -325,15 +319,9 @@ func insertCoinSymbols(ctx context.Context, db *sql.DB, coinSymbols []model.Coin
 		if _, err := stmt.ExecContext(queryCtx,
 			symbol.Symbol, symbol.KoreanName, symbol.TradePrice,
 			symbol.ChangeRate, symbol.IsCaution, symbol.IsWarning); err != nil {
-			_ = tx.Rollback() // 삽입/업데이트 실패 시 롤백
 			return fmt.Errorf("코인 심볼 삽입/업데이트 에러: %w", err)
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
-		_ = tx.Rollback() // 트랜잭션 커밋 실패 시 롤백
-		return fmt.Errorf("트랜잭션 커밋 에러: %w", err)
-	}
-
-	return nil
+	return tx.Commit() // 트랜잭션 커밋
 }

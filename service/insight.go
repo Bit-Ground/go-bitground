@@ -280,9 +280,11 @@ func insertInsights(ctx context.Context, db *sql.DB, insights []Insight) error {
 		return fmt.Errorf("트랜잭션 시작 에러: %w", err)
 	}
 	defer func() {
-		if p := recover(); p != nil { // 패닉 발생 시 롤백
+		if p := recover(); p != nil {
 			_ = tx.Rollback()
-			panic(p) // 패닉 다시 던지기
+			panic(p)
+		} else if err != nil {
+			_ = tx.Rollback()
 		}
 	}()
 
@@ -295,7 +297,6 @@ func insertInsights(ctx context.Context, db *sql.DB, insights []Insight) error {
 	`
 	stmt, err := tx.PrepareContext(queryCtx, query)
 	if err != nil {
-		_ = tx.Rollback() // 쿼리 준비 실패 시 롤백
 		return fmt.Errorf("쿼리 준비 에러: %w", err)
 	}
 	defer func() {
@@ -308,16 +309,9 @@ func insertInsights(ctx context.Context, db *sql.DB, insights []Insight) error {
 
 		_, err := stmt.ExecContext(queryCtx, insight.Symbol, insight.Insight, insight.Score, now.Format("2006-01-02"))
 		if err != nil {
-			_ = tx.Rollback() // 쿼리 실행 실패 시 롤백
 			return fmt.Errorf("데이터베이스 삽입 에러: %w", err)
 		}
 	}
 
-	// 모든 작업이 성공적으로 완료되었으므로 커밋 시도
-	if err := tx.Commit(); err != nil {
-		_ = tx.Rollback() // 트랜잭션 커밋 실패 시 롤백
-		return fmt.Errorf("트랜잭션 커밋 에러: %w", err)
-	}
-
-	return nil
+	return tx.Commit() // 트랜잭션 커밋
 }
