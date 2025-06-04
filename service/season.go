@@ -33,6 +33,7 @@ func UpdateSeason(ctx context.Context, db *sql.DB, seasonID int, obj map[string]
 	g.Go(func() error {
 		return resetUserAssets(gCtx, db)
 	})
+	g.Go(func() error { return deletePendingOrders(gCtx, db, seasonID) })
 
 	// 모든 고루틴이 완료되거나, 첫 번째 에러가 발생할 때까지 대기
 	// 에러가 발생하면 해당 에러를 반환합니다.
@@ -238,6 +239,27 @@ func resetUserAssets(ctx context.Context, db *sql.DB) error {
 	_, err := db.ExecContext(queryCtx, deleteQuery)
 	if err != nil {
 		return fmt.Errorf("user_assets 테이블 초기화 실패: %w", err)
+	}
+
+	return nil
+}
+
+// 기존 시즌 거래내역의 예약주문 내역들을 삭제합니다.
+func deletePendingOrders(ctx context.Context, db *sql.DB, seasonID int) error {
+	// 쿼리 타임아웃 설정 (10초)
+	queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	// 예약주문 내역 삭제 쿼리
+	deleteQuery := `
+		DELETE FROM orders
+		WHERE season_id = ?
+		AND status = 'PENDING';
+	`
+
+	_, err := db.ExecContext(queryCtx, deleteQuery, seasonID)
+	if err != nil {
+		return fmt.Errorf("예약주문 내역 삭제 실패: %w", err)
 	}
 
 	return nil
