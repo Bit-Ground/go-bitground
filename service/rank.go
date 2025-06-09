@@ -92,15 +92,23 @@ func createTempRankingTable(ctx context.Context, db *sql.DB) error {
 	queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	query := `
-		CREATE TEMPORARY TABLE temp_user_rankings (
-			user_id INT PRIMARY KEY,
-			total_value BIGINT NOT NULL,
-			INDEX idx_total_value (total_value DESC)
-		)
-	`
+	// 기존 테이블이 있으면 제거
+	dropQuery := `DROP TABLE IF EXISTS temp_user_rankings`
+	_, err := db.ExecContext(queryCtx, dropQuery)
+	if err != nil {
+		return fmt.Errorf("기존 임시 테이블 제거 실패: %w", err)
+	}
 
-	_, err := db.ExecContext(queryCtx, query)
+	// 일반 테이블로 생성 (TEMPORARY 키워드 제거)
+	createQuery := `
+        CREATE TABLE temp_user_rankings (
+            user_id INT PRIMARY KEY,
+            total_value BIGINT NOT NULL,
+            INDEX idx_total_value (total_value DESC)
+        )
+    `
+
+	_, err = db.ExecContext(queryCtx, createQuery)
 	return err
 }
 
@@ -261,7 +269,7 @@ func dropTempRankingTable(ctx context.Context, db *sql.DB) {
 	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	_, err := db.ExecContext(queryCtx, "DROP TEMPORARY TABLE IF EXISTS temp_user_rankings")
+	_, err := db.ExecContext(queryCtx, "DROP TABLE IF EXISTS temp_user_rankings")
 	if err != nil {
 		log.Printf("임시 테이블 삭제 실패: %v", err)
 	}
