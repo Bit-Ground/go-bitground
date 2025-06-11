@@ -37,6 +37,10 @@ type UpbitCoinPrice struct {
 	TradePrice       float64 `json:"trade_price"`
 	AccTradePrice    float64 `json:"acc_trade_price_24h"`
 	PrevClosingPrice float64 `json:"prev_closing_price"`
+	OpenPrice        float64 `json:"opening_price"`
+	HighPrice        float64 `json:"high_price"`
+	LowPrice         float64 `json:"low_price"`
+	TradeVolume      float64 `json:"trade_volume"`
 }
 
 // UserCash 유저 현금 구조체

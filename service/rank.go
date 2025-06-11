@@ -15,30 +15,36 @@ import (
 )
 
 const BATCH_SIZE = 1000 // 배치 크기 설정
+var DailyFlag bool
+var SeasonID int // 전역 변수로 시즌 ID 저장
 
-func UpdateRank(ctx context.Context, db *sql.DB, symbolMap map[string]int, seasonID int) error {
+// UpdateRank 랭킹 업데이트 함수, 코인 시세정보 반환과, 일일 유저 자산정보 스냅샷 기능이 이후 추가되었습니다.
+func UpdateRank(ctx context.Context, db *sql.DB, symbolMap map[string]int, currentSeasonID int, insightFlag bool) (error, map[int]model.UpbitCoinPrice) {
+	DailyFlag = insightFlag    // DailyFlag 설정
+	SeasonID = currentSeasonID // 시즌 ID 설정
+
 	// 1. 총 참여 유저 수 확인
-	totalUsers, err := getParticipatingUserCount(ctx, db, seasonID)
+	totalUsers, err := getParticipatingUserCount(ctx, db)
 	if err != nil {
-		return fmt.Errorf("유저 수 조회 실패: %w", err)
+		return fmt.Errorf("유저 수 조회 실패: %w", err), nil
 	}
 
 	if totalUsers == 0 {
-		return nil
+		return nil, nil // 참여 유저가 없으면 랭킹 업데이트 필요 없음
 	}
 
 	// 2. 코인 현재가 가져오기
-	coinPrices, err := getAllCoinsCurrentPrice(ctx, symbolMap)
+	coinPrices, coinPriceHistory, err := getAllCoinsCurrentPrice(ctx, symbolMap)
 	if err != nil {
-		return fmt.Errorf("코인 현재가 조회 실패: %w", err)
+		return fmt.Errorf("코인 현재가 조회 실패: %w", err), nil
 	}
 
-	// 3. 배치 처리로 랭킹 업데이트
-	return updateRankWithBatching(ctx, db, seasonID, coinPrices, totalUsers)
+	// 3. 배치 처리로 랭킹 업데이트, 코인 가격 히스토리정보 반환
+	return updateRankWithBatching(ctx, db, coinPrices, totalUsers), coinPriceHistory
 }
 
 // 배치 처리 방식 (모든 경우에 사용)
-func updateRankWithBatching(ctx context.Context, db *sql.DB, seasonID int, coinPrices map[int]float64, totalUsers int) error {
+func updateRankWithBatching(ctx context.Context, db *sql.DB, coinPrices map[int]float64, totalUsers int) error {
 	// 1. 임시 테이블 생성
 	if err := createTempRankingTable(ctx, db); err != nil {
 		return fmt.Errorf("임시 테이블 생성 실패: %w", err)
@@ -48,7 +54,7 @@ func updateRankWithBatching(ctx context.Context, db *sql.DB, seasonID int, coinP
 	// 2. 배치 단위로 유저 자산 계산 및 임시 테이블에 저장
 	offset := 0
 	for offset < totalUsers {
-		if err := processBatch(ctx, db, seasonID, coinPrices, offset, BATCH_SIZE); err != nil {
+		if err := processBatch(ctx, db, coinPrices, offset, BATCH_SIZE); err != nil {
 			return fmt.Errorf("배치 처리 실패 (offset: %d): %w", offset, err)
 		}
 		offset += BATCH_SIZE
@@ -60,7 +66,7 @@ func updateRankWithBatching(ctx context.Context, db *sql.DB, seasonID int, coinP
 	}
 
 	// 3. 임시 테이블에서 랭킹 계산 및 업데이트
-	if err := finalizeRankingFromTemp(ctx, db, seasonID, totalUsers); err != nil {
+	if err := finalizeRankingFromTemp(ctx, db, totalUsers); err != nil {
 		return fmt.Errorf("임시 테이블에서 랭킹 계산 실패: %w", err)
 	}
 
@@ -68,7 +74,7 @@ func updateRankWithBatching(ctx context.Context, db *sql.DB, seasonID int, coinP
 }
 
 // 참여 유저 수 조회
-func getParticipatingUserCount(ctx context.Context, db *sql.DB, seasonID int) (int, error) {
+func getParticipatingUserCount(ctx context.Context, db *sql.DB) (int, error) {
 	queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
@@ -79,7 +85,7 @@ func getParticipatingUserCount(ctx context.Context, db *sql.DB, seasonID int) (i
 	`
 
 	var count int
-	err := db.QueryRowContext(queryCtx, query, seasonID).Scan(&count)
+	err := db.QueryRowContext(queryCtx, query, SeasonID).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("쿼리 실행 에러: %w", err)
 	}
@@ -113,9 +119,9 @@ func createTempRankingTable(ctx context.Context, db *sql.DB) error {
 }
 
 // 배치 단위로 유저 자산 계산
-func processBatch(ctx context.Context, db *sql.DB, seasonID int, coinPrices map[int]float64, offset, limit int) error {
+func processBatch(ctx context.Context, db *sql.DB, coinPrices map[int]float64, offset, limit int) error {
 	// 1. 배치 단위로 유저 ID 가져오기
-	userIDs, err := getParticipatingUserIDsBatch(ctx, db, seasonID, offset, limit)
+	userIDs, err := getParticipatingUserIDsBatch(ctx, db, offset, limit)
 	if err != nil {
 		return err
 	}
@@ -150,7 +156,7 @@ func processBatch(ctx context.Context, db *sql.DB, seasonID int, coinPrices map[
 }
 
 // 배치 단위로 유저 ID 조회
-func getParticipatingUserIDsBatch(ctx context.Context, db *sql.DB, seasonID, offset, limit int) ([]int, error) {
+func getParticipatingUserIDsBatch(ctx context.Context, db *sql.DB, offset, limit int) ([]int, error) {
 	queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
@@ -162,7 +168,7 @@ func getParticipatingUserIDsBatch(ctx context.Context, db *sql.DB, seasonID, off
 		LIMIT ? OFFSET ?
 	`
 
-	rows, err := db.QueryContext(queryCtx, query, seasonID, limit, offset)
+	rows, err := db.QueryContext(queryCtx, query, SeasonID, limit, offset)
 	if err != nil {
 		return nil, fmt.Errorf("쿼리 실행 에러: %w", err)
 	}
@@ -184,8 +190,9 @@ func getParticipatingUserIDsBatch(ctx context.Context, db *sql.DB, seasonID, off
 	return userIDs, rows.Err()
 }
 
-// 배치를 임시 테이블에 저장
-func insertBatchToTemp(ctx context.Context, db *sql.DB, userIDs []int, userCashMap map[int]int, userAssetsMap map[int][]model.UserAsset, coinPrices map[int]float64) error {
+// 배치를 임시 테이블에 저장, dailyFlag가 true인 경우 DailyBalance 업데이트
+func insertBatchToTemp(ctx context.Context, db *sql.DB, userIDs []int, userCashMap map[int]int,
+	userAssetsMap map[int][]model.UserAsset, coinPrices map[int]float64) error {
 	queryCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
@@ -213,19 +220,55 @@ func insertBatchToTemp(ctx context.Context, db *sql.DB, userIDs []int, userCashM
 		}
 	}(stmt)
 
+	// DailyBalance 업데이트 쿼리
+	dailyBalanceQuery := `INSERT INTO user_daily_balances (user_id, cash_balance, coin_holdings_value, total_value, season_id, snapshot_date)
+    VALUES (?, ?, ?, ?, ?, ?)
+    	ON DUPLICATE KEY UPDATE
+    	                    		cash_balance = VALUES(cash_balance),
+    	                    		coin_holdings_value = VALUES(coin_holdings_value),
+    	                    		total_value = VALUES(total_value)`
+	dStmt, err := tx.PrepareContext(queryCtx, dailyBalanceQuery)
+	if err != nil {
+		return fmt.Errorf("일일 잔액 쿼리 준비 에러: %w", err)
+	}
+	defer func(dStmt *sql.Stmt) {
+		if err := dStmt.Close(); err != nil {
+			log.Printf("일일 잔액 쿼리 종료 에러: %v\n", err)
+		}
+	}(dStmt)
+
 	for _, userID := range userIDs {
-		totalValue := calculateUserTotalValue(userID, userCashMap, userAssetsMap, coinPrices)
+		totalValue, cash := calculateUserTotalValue(userID, userCashMap, userAssetsMap, coinPrices)
 		if _, err := stmt.ExecContext(queryCtx, userID, totalValue); err != nil {
 			return fmt.Errorf("임시 테이블에 데이터 삽입 실패 (user_id: %d): %w", userID, err)
 		}
 
+		// DailyFlag가 true인 경우, DailyBalance 업데이트
+		if DailyFlag {
+			// 현재 날짜를 YYYY-MM-DD 형식으로 가져오기
+			snapshotDate := time.Now().Format("2006-01-02")
+
+			// 코인 보유 가치 계산 (총 자산에서 현금 제외)
+			coinHoldingsValue := totalValue - cash
+
+			// 개별 필드를 매개변수로 전달
+			if _, err := dStmt.ExecContext(queryCtx,
+				userID,
+				cash,
+				coinHoldingsValue,
+				totalValue,
+				SeasonID,
+				snapshotDate); err != nil {
+				return fmt.Errorf("일일 잔액 업데이트 실패 (user_id: %d): %w", userID, err)
+			}
+		}
 	}
 
 	return tx.Commit()
 }
 
 // 임시 테이블에서 최종 랭킹 계산 및 업데이트
-func finalizeRankingFromTemp(ctx context.Context, db *sql.DB, seasonID, totalUsers int) error {
+func finalizeRankingFromTemp(ctx context.Context, db *sql.DB, totalUsers int) error {
 	queryCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
@@ -260,7 +303,7 @@ func finalizeRankingFromTemp(ctx context.Context, db *sql.DB, seasonID, totalUse
 		   tier = VALUES(tier)
 	`
 
-	_, err := db.ExecContext(queryCtx, query, seasonID, totalUsers, totalUsers, totalUsers, totalUsers)
+	_, err := db.ExecContext(queryCtx, query, SeasonID, totalUsers, totalUsers, totalUsers, totalUsers)
 	return err
 }
 
@@ -275,10 +318,7 @@ func dropTempRankingTable(ctx context.Context, db *sql.DB) {
 	}
 }
 
-// getParticipatingUserIDs - 더 이상 사용하지 않지만 하위 호환성을 위해 남겨둠
-// 배치 처리에서는 getParticipatingUserIDsBatch를 사용
-
-func getAllCoinsCurrentPrice(ctx context.Context, symbolMap map[string]int) (map[int]float64, error) {
+func getAllCoinsCurrentPrice(ctx context.Context, symbolMap map[string]int) (map[int]float64, map[int]model.UpbitCoinPrice, error) {
 	apiURL := "https://api.upbit.com/v1/ticker/all?quote_currencies=KRW"
 
 	reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -286,13 +326,13 @@ func getAllCoinsCurrentPrice(ctx context.Context, symbolMap map[string]int) (map
 
 	req, err := http.NewRequestWithContext(reqCtx, "GET", apiURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("HTTP 요청 생성 에러: %w", err)
+		return nil, nil, fmt.Errorf("HTTP 요청 생성 에러: %w", err)
 	}
 
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("API 요청 에러: %w", err)
+		return nil, nil, fmt.Errorf("API 요청 에러: %w", err)
 	}
 	defer func(Body io.ReadCloser) {
 		if err := Body.Close(); err != nil {
@@ -303,18 +343,21 @@ func getAllCoinsCurrentPrice(ctx context.Context, symbolMap map[string]int) (map
 	var upbitPrices []model.UpbitCoinPrice
 	err = json.NewDecoder(resp.Body).Decode(&upbitPrices)
 	if err != nil {
-		return nil, fmt.Errorf("JSON 디코딩 에러: %w", err)
+		return nil, nil, fmt.Errorf("JSON 디코딩 에러: %w", err)
 	}
 
 	coinPrices := make(map[int]float64)
+	coinPriceHistory := make(map[int]model.UpbitCoinPrice)
+
 	for _, upbitCoin := range upbitPrices {
 		symbol := upbitCoin.Market
 		if symbolId, exists := symbolMap[symbol]; exists {
 			coinPrices[symbolId] = upbitCoin.TradePrice
+			coinPriceHistory[symbolId] = upbitCoin
 		}
 	}
 
-	return coinPrices, nil
+	return coinPrices, coinPriceHistory, nil
 }
 
 func getUserCashMap(ctx context.Context, db *sql.DB, userIDs []int) (map[int]int, error) {
@@ -383,7 +426,7 @@ func getUserAssetsMap(ctx context.Context, db *sql.DB, userIDs []int) (map[int][
 	return userAssetsMap, nil
 }
 
-func calculateUserTotalValue(userID int, userCashMap map[int]int, userAssetsMap map[int][]model.UserAsset, priceMap map[int]float64) int {
+func calculateUserTotalValue(userID int, userCashMap map[int]int, userAssetsMap map[int][]model.UserAsset, priceMap map[int]float64) (int, int) {
 	cash := userCashMap[userID]
 	totalValue := float64(cash)
 
@@ -394,7 +437,7 @@ func calculateUserTotalValue(userID int, userCashMap map[int]int, userAssetsMap 
 		}
 	}
 
-	return int(totalValue)
+	return int(totalValue), cash
 }
 
 // GetCurrentSeasonID 진행중인 시즌 ID 가져오기

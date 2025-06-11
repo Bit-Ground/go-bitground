@@ -41,11 +41,9 @@ func TimeCheck(obj map[string]interface{}) (model.UpdateFlags, error) {
 	var coinUpdate, seasonUpdate, splitUpdate, insightUpdate bool
 
 	if chkType == "dev" {
-		coinUpdate = true
 		seasonUpdate = hour%6 == 0
 		splitUpdate = hour%6 == 3
 	} else {
-		coinUpdate = true
 		if hour == 0 {
 			seasonUpdate = day == 1 || day == 16
 			splitUpdate = day == 8 || day == 23
@@ -54,6 +52,7 @@ func TimeCheck(obj map[string]interface{}) (model.UpdateFlags, error) {
 
 	if hour == 0 {
 		insightUpdate = true
+		coinUpdate = true
 	}
 
 	return model.UpdateFlags{
