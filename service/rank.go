@@ -19,32 +19,32 @@ var DailyFlag bool
 var SeasonID int // 전역 변수로 시즌 ID 저장
 
 // UpdateRank 랭킹 업데이트 함수, 코인 시세정보 반환과, 일일 유저 자산정보 스냅샷 기능이 이후 추가되었습니다.
-func UpdateRank(ctx context.Context, db *sql.DB, symbolMap map[string]int, currentSeasonID int, insightFlag bool) (error, map[int]model.UpbitCoinPrice) {
+func UpdateRank(ctx context.Context, db *sql.DB, symbolMap map[string]int, currentSeasonID int, insightFlag bool) (error, map[int]model.UpbitCoinPrice, map[int]float64) {
 	DailyFlag = insightFlag    // DailyFlag 설정
 	SeasonID = currentSeasonID // 시즌 ID 설정
 
 	// 1. 총 참여 유저 수 확인
 	totalUsers, err := getParticipatingUserCount(ctx, db)
 	if err != nil {
-		return fmt.Errorf("유저 수 조회 실패: %w", err), nil
-	}
-
-	if totalUsers == 0 {
-		return nil, nil // 참여 유저가 없으면 랭킹 업데이트 필요 없음
+		return fmt.Errorf("유저 수 조회 실패: %w", err), nil, nil
 	}
 
 	// 2. 코인 현재가 가져오기
 	coinPrices, coinPriceHistory, err := getAllCoinsCurrentPrice(ctx, symbolMap)
 	if err != nil {
-		return fmt.Errorf("코인 현재가 조회 실패: %w", err), nil
+		return fmt.Errorf("코인 현재가 조회 실패: %w", err), nil, nil
 	}
 
 	// 3. 배치 처리로 랭킹 업데이트, 코인 가격 히스토리정보 반환
-	return updateRankWithBatching(ctx, db, coinPrices, totalUsers), coinPriceHistory
+	return updateRankWithBatching(ctx, db, coinPrices, totalUsers), coinPriceHistory, coinPrices
 }
 
 // 배치 처리 방식 (모든 경우에 사용)
 func updateRankWithBatching(ctx context.Context, db *sql.DB, coinPrices map[int]float64, totalUsers int) error {
+	if totalUsers == 0 {
+		return nil // 참여 유저가 없으면 랭킹 업데이트 필요 없음
+	}
+
 	// 1. 임시 테이블 생성
 	if err := createTempRankingTable(ctx, db); err != nil {
 		return fmt.Errorf("임시 테이블 생성 실패: %w", err)

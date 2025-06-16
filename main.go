@@ -6,31 +6,34 @@ import (
 	"Bitground-go/util"
 	"context"
 	"database/sql"
+	"github.com/joho/godotenv"
 	"golang.org/x/sync/errgroup"
 	"log"
+	"os"
 	"time"
 )
 
 // 배포 시 주석
-//func main() {
-//	err := godotenv.Load()
-//	if err != nil {
-//		log.Fatalf("Error loading .env file: %v", err)
-//	}
-//
-//	obj := make(map[string]interface{})
-//	// 환경 변수에서 DB 연결 정보 가져오기
-//	obj["DB_HOST"] = os.Getenv("DB_HOST")
-//	obj["DB_USER"] = os.Getenv("DB_USER")
-//	obj["DB_PASSWORD"] = os.Getenv("DB_PASSWORD")
-//	obj["DB_NAME"] = os.Getenv("DB_NAME")
-//	obj["TYPE"] = os.Getenv("TYPE")
-//	obj["TEST_TIME"] = os.Getenv("TEST_TIME")
-//	obj["GOOGLE_API_KEY"] = os.Getenv("GOOGLE_API_KEY")
-//	obj["SEASON_NAME"] = os.Getenv("SEASON_NAME")
-//
-//	Main(obj)
-//}
+func main() {
+	err := godotenv.Load()
+	if err != nil {
+		log.Fatalf("Error loading .env file: %v", err)
+	}
+
+	obj := make(map[string]interface{})
+	// 환경 변수에서 DB 연결 정보 가져오기
+	obj["DB_HOST"] = os.Getenv("DB_HOST")
+	obj["DB_USER"] = os.Getenv("DB_USER")
+	obj["DB_PASSWORD"] = os.Getenv("DB_PASSWORD")
+	obj["DB_NAME"] = os.Getenv("DB_NAME")
+	obj["TYPE"] = os.Getenv("TYPE")
+	obj["TEST_TIME"] = os.Getenv("TEST_TIME")
+	obj["GOOGLE_API_KEY"] = os.Getenv("GOOGLE_API_KEY")
+	obj["SEASON_NAME"] = os.Getenv("SEASON_NAME")
+	obj["SEASON_UPDATE_KEY"] = os.Getenv("SEASON_UPDATE_KEY")
+
+	Main(obj)
+}
 
 func Main(obj map[string]interface{}) map[string]interface{} {
 	isSuccess := true
@@ -128,7 +131,7 @@ func Main(obj map[string]interface{}) map[string]interface{} {
 	// 5-3. 유저 자산 업데이트 수행
 	if flags.Split {
 		log.Println("유저 자산 업데이트 시작")
-		err = service.UpdateSplit(ctx, db)
+		err = service.UpdateSplit(ctx, db, obj)
 		if err != nil {
 			isSuccess = false
 			log.Println("유저 자산 업데이트 실패:", err)
@@ -146,7 +149,7 @@ func Main(obj map[string]interface{}) map[string]interface{} {
 	} else {
 		log.Println("유저 자산 스냅샷 업데이트 생략")
 	}
-	err, coinPriceHistory := service.UpdateRank(ctx, db, symbolMap, seasonID, flags.Coin)
+	err, coinPriceHistory, coinPrices := service.UpdateRank(ctx, db, symbolMap, seasonID, flags.Coin)
 	if err != nil {
 		isSuccess = false
 		log.Println("랭킹(& 유저 자산 스냅샷) 업데이트 실패:", err)
@@ -160,7 +163,7 @@ func Main(obj map[string]interface{}) map[string]interface{} {
 	// 5-5. 시즌 업데이트 수행
 	if flags.Season {
 		log.Println("시즌 업데이트 시작")
-		err = service.UpdateSeason(ctx, db, seasonID, obj)
+		err = service.UpdateSeason(ctx, db, seasonID, coinPrices, obj)
 		if err != nil {
 			isSuccess = false
 			log.Println("시즌 업데이트 실패:", err)

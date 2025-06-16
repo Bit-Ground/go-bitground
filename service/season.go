@@ -1,19 +1,25 @@
 package service
 
 import (
+	"Bitground-go/model"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
 	"golang.org/x/sync/errgroup"
+	"io"
+	"log"
+	"net/http"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 )
 
-func UpdateSeason(ctx context.Context, db *sql.DB, seasonID int, obj map[string]interface{}) error {
+func UpdateSeason(ctx context.Context, db *sql.DB, seasonID int, coinPrices map[int]float64, obj map[string]interface{}) error {
 	seasonName := obj["SEASON_NAME"].(string)
 	chkType := obj["TYPE"].(string)
+	seasonUpdateKey := obj["SEASON_UPDATE_KEY"].(string)
 
 	// errgroup.WithContext는 컨텍스트와 함께 새로운 Group을 생성합니다.
 	// Group 내의 고루틴 중 하나라도 에러를 반환하면, Group의 Context는 취소되고
@@ -31,7 +37,7 @@ func UpdateSeason(ctx context.Context, db *sql.DB, seasonID int, obj map[string]
 		return resetUserCash(gCtx, db)
 	})
 	g.Go(func() error {
-		return resetUserAssets(gCtx, db)
+		return resetUserAssetsWithProgress(gCtx, db, seasonID, coinPrices)
 	})
 	g.Go(func() error { return deletePendingOrders(gCtx, db, seasonID) })
 
@@ -44,6 +50,11 @@ func UpdateSeason(ctx context.Context, db *sql.DB, seasonID int, obj map[string]
 	// 기존 시즌의 reward_calculated 컬럼을 업데이트
 	if err := updateSeasonRewardCalculated(ctx, db, seasonID); err != nil {
 		return fmt.Errorf("reward_calculated 업데이트 실패: %w", err)
+	}
+
+	// NotifySeasonUpdate 함수를 호출하여 스프링 서버에 시즌 업데이트 요청
+	if err := NotifySeasonUpdate(ctx, seasonUpdateKey, "season"); err != nil {
+		return fmt.Errorf("NotifySeasonUpdate 에러: %w", err)
 	}
 
 	return nil
@@ -227,7 +238,14 @@ func resetUserCash(ctx context.Context, db *sql.DB) error {
 }
 
 // user_assets 테이블 초기화
-func resetUserAssets(ctx context.Context, db *sql.DB) error {
+func resetUserAssets(ctx context.Context, db *sql.DB, seasonID int, coinPrices map[int]float64) error {
+	// 1. user_assets 데이터를 orders로 이동
+	err := migrateUserAssetsToOrders(ctx, db, seasonID, coinPrices)
+	if err != nil {
+		return fmt.Errorf("user_assets 데이터 이동 실패: %w", err)
+	}
+
+	// 2. user_assets 테이블 초기화
 	// 쿼리 타임아웃 설정 (5초)
 	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -236,7 +254,7 @@ func resetUserAssets(ctx context.Context, db *sql.DB) error {
 	deleteQuery := `
 		DELETE FROM user_assets;
 	`
-	_, err := db.ExecContext(queryCtx, deleteQuery)
+	_, err = db.ExecContext(queryCtx, deleteQuery)
 	if err != nil {
 		return fmt.Errorf("user_assets 테이블 초기화 실패: %w", err)
 	}
@@ -283,5 +301,216 @@ func updateSeasonRewardCalculated(ctx context.Context, db *sql.DB, seasonID int)
 		return fmt.Errorf("시즌 reward_calculated 업데이트 실패: %w", err)
 	}
 
+	return nil
+}
+
+// NotifySeasonUpdate 내 스프링 서버에 시즌/스플릿 업데이트 요청을 보냅니다.
+func NotifySeasonUpdate(ctx context.Context, seasonUpdateKey string, seasonFlag string) error {
+	apiURL := "https://api.bitground.kr/seasons/update"
+
+	// Context를 활용한 HTTP 요청 (타임아웃: 10초)
+	reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	// POST 요청을 위한 폼 데이터 생성
+	formData := fmt.Sprintf("secretKey=%s&seasonFlag=%s", seasonUpdateKey, seasonFlag)
+
+	req, err := http.NewRequestWithContext(reqCtx, "POST", apiURL, strings.NewReader(formData))
+	if err != nil {
+		return fmt.Errorf("HTTP 요청 생성 에러: %w", err)
+	}
+
+	// Content-Type 헤더 설정
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	// 요청 보내기
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("API 요청 에러: %w", err)
+	}
+	defer func(Body io.ReadCloser) {
+		// 응답 본문을 닫아 리소스 누수 방지
+		if err := Body.Close(); err != nil {
+			log.Printf("응답 본문 닫기 에러: %v\n", err)
+		}
+	}(resp.Body)
+
+	// 응답 확인
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("서버 응답 에러: 상태 코드 %d", resp.StatusCode)
+	}
+
+	return nil
+}
+
+// user_assets 데이터를 orders 테이블로 배치 이동
+func migrateUserAssetsToOrders(ctx context.Context, db *sql.DB, seasonID int, coinPrices map[int]float64) error {
+	const batchSize = 1000
+	offset := 0
+
+	for {
+		// 배치 단위로 user_assets 데이터 조회
+		userAssets, err := fetchUserAssetsBatch(ctx, db, batchSize, offset)
+		if err != nil {
+			return fmt.Errorf("user_assets 배치 조회 실패 (offset: %d): %w", offset, err)
+		}
+
+		// 더 이상 데이터가 없으면 종료
+		if len(userAssets) == 0 {
+			break
+		}
+
+		// 배치 단위로 orders 테이블에 삽입
+		err = insertOrdersBatch(ctx, db, userAssets, seasonID, coinPrices)
+		if err != nil {
+			return fmt.Errorf("orders 배치 삽입 실패 (offset: %d): %w", offset, err)
+		}
+
+		log.Printf("배치 처리 완료: %d개 레코드 처리됨 (offset: %d)\n", len(userAssets), offset)
+
+		// 다음 배치로 이동
+		offset += batchSize
+
+		// 배치 처리 간 잠시 대기 (DB 부하 방지)
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	return nil
+}
+
+// user_assets에서 배치 단위로 데이터 조회
+func fetchUserAssetsBatch(ctx context.Context, db *sql.DB, limit, offset int) ([]model.UserAsset, error) {
+	queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	query := `
+		SELECT amount, symbol_id, user_id 
+		FROM user_assets 
+		ORDER BY id 
+		LIMIT ? OFFSET ?
+	`
+
+	rows, err := db.QueryContext(queryCtx, query, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer func(rows *sql.Rows) {
+		if err := rows.Close(); err != nil {
+			log.Printf("행 닫기 에러: %v\n", err)
+		}
+	}(rows)
+
+	var userAssets []model.UserAsset
+	for rows.Next() {
+		var asset model.UserAsset
+		err := rows.Scan(&asset.Amount, &asset.SymbolID, &asset.UserID)
+		if err != nil {
+			return nil, err
+		}
+		userAssets = append(userAssets, asset)
+	}
+
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return userAssets, nil
+}
+
+// orders 테이블에 배치 삽입
+func insertOrdersBatch(ctx context.Context, db *sql.DB, userAssets []model.UserAsset, seasonID int, coinPrices map[int]float64) error {
+	if len(userAssets) == 0 {
+		return nil
+	}
+
+	queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	// 트랜잭션 시작
+	tx, err := db.BeginTx(queryCtx, nil)
+	if err != nil {
+		return fmt.Errorf("트랜잭션 시작 에러: %w", err)
+	}
+	defer func() {
+		if p := recover(); p != nil {
+			_ = tx.Rollback()
+			panic(p)
+		} else if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	// bulk insert 쿼리 생성을 위한 준비
+	valueStrings := make([]string, 0, len(userAssets))
+	valueArgs := make([]interface{}, 0, len(userAssets)*5)
+
+	for _, asset := range userAssets {
+		// coinPrices 맵에서 trade_price 조회
+		tradePrice, exists := coinPrices[asset.SymbolID]
+		if !exists {
+			// 가격 정보가 없는 경우 기본값 설정
+			log.Printf("경고: symbol_id %d에 대한 가격 정보가 없습니다\n", asset.SymbolID)
+			continue
+		}
+
+		valueStrings = append(valueStrings, "(?, ?, ?, ?, ?, 'SELL', 'COMPLETED')")
+		valueArgs = append(valueArgs,
+			asset.Amount,
+			asset.SymbolID,
+			asset.UserID,
+			seasonID,
+			tradePrice)
+	}
+
+	if len(valueStrings) == 0 {
+		return nil // 삽입할 데이터가 없음
+	}
+
+	// bulk insert 쿼리 완성
+	stmt := fmt.Sprintf(`
+		INSERT INTO orders (amount, symbol_id, user_id, season_id, trade_price, order_type, status) 
+		VALUES %s`, strings.Join(valueStrings, ","))
+
+	_, err = tx.ExecContext(queryCtx, stmt, valueArgs...)
+	if err != nil {
+		return fmt.Errorf("orders 배치 삽입 실패: %w", err)
+	}
+
+	return tx.Commit()
+}
+
+// 전체 user_assets 개수 조회 (진행률 표시용)
+func getUserAssetsCount(ctx context.Context, db *sql.DB) (int, error) {
+	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	var count int
+	query := `SELECT COUNT(*) FROM user_assets`
+	err := db.QueryRowContext(queryCtx, query).Scan(&count)
+	if err != nil {
+		return 0, err
+	}
+
+	return count, nil
+}
+
+// 진행률과 함께 실행하는 래퍼 함수
+func resetUserAssetsWithProgress(ctx context.Context, db *sql.DB, seasonID int, coinPrices map[int]float64) error {
+	// 전체 개수 조회
+	totalCount, err := getUserAssetsCount(ctx, db)
+	if err != nil {
+		return fmt.Errorf("user_assets 개수 조회 실패: %w", err)
+	}
+
+	log.Printf("총 %d개의 user_assets 레코드를 처리합니다\n", totalCount)
+
+	// 초기화 실행
+	err = resetUserAssets(ctx, db, seasonID, coinPrices)
+	if err != nil {
+		return err
+	}
+
+	log.Println("user_assets 테이블 초기화가 완료되었습니다")
 	return nil
 }
