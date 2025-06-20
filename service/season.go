@@ -204,9 +204,9 @@ func updateUserTiers(ctx context.Context, db *sql.DB, seasonID int) error {
 	// 티어 업데이트 쿼리
 	updateQuery := `
 		UPDATE users u
-		JOIN user_rankings ur ON u.id = ur.user_id
-		SET u.tier = ur.tier
-		WHERE ur.season_id = ?;
+		LEFT JOIN user_rankings ur ON u.id = ur.user_id AND ur.season_id = ?
+		SET u.tier = IFNULL(ur.tier, 0)
+		WHERE u.is_deleted = 0;
 	`
 
 	_, err := db.ExecContext(queryCtx, updateQuery, seasonID)
